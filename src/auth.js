@@ -32,10 +32,27 @@ export const baseUrl = () => trimSlash(readConfig()?.url || process.env.LEADSPIC
 export const configDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'leadspicker');
 const configPath = () => path.join(configDir(), 'config.json');
 
+/**
+ * Windows refuses to rename over a file another process has open (and to open one mid-rename),
+ * which parallel runs hit while one of them stores a refreshed token. Such errors pass in moments.
+ * @template T @param {() => T} fn @returns {T}
+ */
+function retryBusy(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+      if (attempt >= 50 || !['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '')) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** @returns {Config | null} */
 export function readConfig() {
   try {
-    return JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    return JSON.parse(retryBusy(() => fs.readFileSync(configPath(), 'utf8')));
   } catch {
     return null;
   }
@@ -47,7 +64,7 @@ function writeConfig(config) {
   // Write-then-rename, so a parallel reader never sees half a file.
   const tmp = `${configPath()}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmp, configPath());
+  retryBusy(() => fs.renameSync(tmp, configPath()));
 }
 
 const b64url = (/** @type {Buffer} */ buf) => buf.toString('base64url');
