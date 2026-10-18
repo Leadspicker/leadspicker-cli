@@ -1,0 +1,26 @@
+{
+  "name": "@leadspicker/cli",
+  "version": "0.1.0",
+  "description": "Leadspicker on the command line: every MCP tool as a command, with OAuth login.",
+  "keywords": ["leadspicker", "cli", "mcp", "sales", "outreach"],
+  "license": "MIT",
+  "homepage": "https://www.leadspicker.com/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leadspicker/leadspicker-cli.git"
+  },
+  "type": "module",
+  "bin": {
+    "leadspicker": "bin/leadspicker.js"
+  },
+  "files": ["bin", "src"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
