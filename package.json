@@ -1,11 +1,11 @@
 {
   "name": "@leadspicker/cli",
   "version": "0.1.0-beta.1",
-  "description": "Leadspicker on the command line: every MCP tool as a command, with OAuth login.",
+  "description": "The Leadspicker API on the command line: every endpoint as a command, with OAuth login.",
   "keywords": [
     "leadspicker",
     "cli",
-    "mcp",
+    "api",
     "sales",
     "outreach"
   ],
