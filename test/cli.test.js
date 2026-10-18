@@ -105,18 +105,30 @@ describe('discovery (works logged out)', () => {
 describe('login', () => {
   const authUrlOf = (stderr) => stderr.match(/(http:\/\/127\.0\.0\.1:\d+\/authorize\?\S+)/)?.[1];
 
-  test('--no-browser: following the printed URL completes the loopback login', async () => {
-    let followed = false;
-    const result = await cli(['login', '--no-browser'], {
-      onStderr: async (stderr) => {
-        const authUrl = authUrlOf(stderr);
-        if (!authUrl || followed) return;
-        followed = true;
-        const consent = await fetch(authUrl, { redirect: 'manual' });
-        await fetch(consent.headers.get('location')); // the browser landing on the CLI's loopback port
-      },
+  /** Plays the browser: approve, then land on the CLI's loopback port. Resolves with the page shown. */
+  function browserLogin() {
+    let page;
+    return new Promise((resolve) => {
+      cli(['login', '--no-browser'], {
+        onStderr: async (stderr) => {
+          const authUrl = authUrlOf(stderr);
+          if (!authUrl || page) return;
+          page = fetch(authUrl, { redirect: 'manual' }).then((consent) => fetch(consent.headers.get('location')));
+        },
+      }).then(async (result) => {
+        const res = await page;
+        resolve({ ...result, status: res.status, html: await res.text() });
+      });
     });
+  }
+
+  test('--no-browser: following the printed URL completes the loopback login', async () => {
+    const result = await browserLogin();
     assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /Logged in to http:\/\/127\.0\.0\.1:\d+ as test@example\.com/);
+    assert.equal(result.status, 200);
+    assert.match(result.html, /You&#39;re logged in/);
+    assert.match(result.html, /<strong>test@example\.com<\/strong>/);
     assert.match(readConfig().access_token, /^at-/);
     if (process.platform !== 'win32') assert.equal(fs.statSync(configFile()).mode & 0o777, 0o600);
   });
@@ -134,6 +146,20 @@ describe('login', () => {
     });
     assert.equal(result.code, 0, result.stderr);
     assert.match(readConfig().access_token, /^at-/);
+  });
+
+  test('a refused consent shows the error page and exits with code 3', async () => {
+    server.state.denyConsent = true;
+    try {
+      const result = await browserLogin();
+      assert.equal(result.code, 3);
+      assert.match(result.stderr, /Login refused: The user denied access\./);
+      assert.equal(result.status, 400);
+      assert.match(result.html, /Login didn&#39;t complete/);
+      assert.match(result.html, /leadspicker login/);
+    } finally {
+      server.state.denyConsent = false;
+    }
   });
 
   test('commands need a login (exit code 3)', async () => {

@@ -29,8 +29,8 @@ async function run(argv) {
   if (first === 'login') {
     if (rest.includes('--help')) return print(`Usage: ${PROG} login [--url URL] [--no-browser]`);
     const opts = parseOwnFlags(rest, { url: 'string', 'no-browser': 'boolean' });
-    const config = await login({ url: /** @type {string | undefined} */ (opts.url), noBrowser: Boolean(opts['no-browser']) });
-    return void process.stderr.write(`Logged in to ${config.url}. Next: ${PROG} --help\n`);
+    const { config, email } = await login({ url: /** @type {string | undefined} */ (opts.url), noBrowser: Boolean(opts['no-browser']) });
+    return void process.stderr.write(`Logged in to ${config.url}${email ? ` as ${email}` : ''}. Next: ${PROG} --help\n`);
   }
   if (first === 'logout') return void process.stderr.write((await logout()) ? 'Logged out.\n' : 'Not logged in.\n');
   if (first === 'whoami') return printResponse(await send('GET', '/auth/me'));

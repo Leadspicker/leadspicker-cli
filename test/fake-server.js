@@ -64,7 +64,7 @@ export const SPEC = {
 };
 
 export async function startFakeServer() {
-  const state = { refreshCalls: 0, specFetches: 0, revoked: [], requests: [], access: new Set(), refresh: new Set(), codes: new Map(), counter: 0 };
+  const state = { denyConsent: false, refreshCalls: 0, specFetches: 0, revoked: [], requests: [], access: new Set(), refresh: new Set(), codes: new Map(), counter: 0 };
   const issue = () => {
     const n = ++state.counter;
     state.access.add(`at-${n}`);
@@ -88,7 +88,8 @@ export async function startFakeServer() {
       const code = `code-${crypto.randomUUID()}`;
       state.codes.set(code, url.searchParams.get('code_challenge'));
       const back = new URL(url.searchParams.get('redirect_uri'));
-      back.search = new URLSearchParams({ code, state: url.searchParams.get('state') }).toString();
+      const reply = state.denyConsent ? { error: 'access_denied', error_description: 'The user denied access.' } : { code };
+      back.search = new URLSearchParams({ ...reply, state: url.searchParams.get('state') }).toString();
       return res.writeHead(302, { location: back.toString() }).end();
     }
     if (url.pathname === '/token') {

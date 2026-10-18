@@ -8,6 +8,7 @@ import readline from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CliError, EXIT, notLoggedIn, postForm, request } from './http.js';
+import { errorPage, successPage } from './page.js';
 
 export const DEFAULT_URL = 'https://app.leadspicker.com';
 // The server's built-in public OAuth client, which accepts any loopback redirect port.
@@ -95,33 +96,47 @@ export async function login({ url, noBrowser = false }) {
     process.stderr.write(`Opening the browser to log in. If it doesn't open, visit:\n\n  ${authUrl}\n\n`);
     openBrowser(authUrl);
   }
-  let code;
   try {
-    code = await Promise.race(sources);
+    const code = await Promise.race(sources);
+    done.abort();
+    const token = await postForm(meta.token_endpoint, {
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+      client_id: CLIENT_ID,
+    });
+    if (!token.ok) throw new CliError(`Login failed: ${token.body.error_description || token.body.error || `HTTP ${token.status}`}`, EXIT.AUTH);
+
+    /** @type {Config} */
+    const config = {
+      url: base,
+      client_id: CLIENT_ID,
+      token_endpoint: meta.token_endpoint,
+      revocation_endpoint: meta.revocation_endpoint,
+      ...tokenFields(token.body),
+    };
+    writeConfig(config);
+    const email = await currentEmail(config);
+    callback.finish(200, successPage(base, email));
+    return { config, email };
+  } catch (err) {
+    callback.finish(400, errorPage(base, /** @type {Error} */ (err).message));
+    throw err;
   } finally {
     done.abort();
     callback.close();
   }
+}
 
-  const token = await postForm(meta.token_endpoint, {
-    grant_type: 'authorization_code',
-    code,
-    redirect_uri: redirectUri,
-    code_verifier: verifier,
-    client_id: CLIENT_ID,
-  });
-  if (!token.ok) throw new CliError(`Login failed: ${token.body.error_description || token.body.error || `HTTP ${token.status}`}`, EXIT.AUTH);
-
-  /** @type {Config} */
-  const config = {
-    url: base,
-    client_id: CLIENT_ID,
-    token_endpoint: meta.token_endpoint,
-    revocation_endpoint: meta.revocation_endpoint,
-    ...tokenFields(token.body),
-  };
-  writeConfig(config);
-  return config;
+/** The logged-in user's e-mail, for the confirmation; null when it can't be read. @param {Config} config */
+async function currentEmail(config) {
+  try {
+    const res = await request(`${config.url}/app/sb/api/auth/me`, { headers: { authorization: `Bearer ${config.access_token}`, accept: 'application/json' } });
+    return res.ok ? ((await res.json()).email ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** @param {any} body */
@@ -131,28 +146,45 @@ const tokenFields = (body) => ({
   expires_at: Date.now() + (Number(body.expires_in) || 3600) * 1000,
 });
 
-/** @param {string} state */
+/**
+ * Waits for the browser's redirect. Its response is held until `finish`, so the page shows how the
+ * login really ended (the token exchange happens after the redirect).
+ * @param {string} state
+ */
 function listenForCallback(state) {
   /** @type {(code: string) => void} */ let resolve;
   /** @type {(err: Error) => void} */ let reject;
   const code = new Promise((res, rej) => { resolve = res; reject = rej; });
   code.catch(() => {}); // a pasted URL may win the race; this promise is then never awaited
+  /** @type {import('node:http').ServerResponse | null} */
+  let pending = null;
+  /** @param {import('node:http').ServerResponse} res @param {number} status @param {string} html */
+  const send = (res, status, html) => res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', connection: 'close' }).end(html);
+
   const server = http.createServer((req, res) => {
     const params = new URL(req.url || '/', 'http://127.0.0.1').searchParams;
-    if (!params.has('code') && !params.has('error')) return res.writeHead(404).end();
+    if (pending || (!params.has('code') && !params.has('error'))) return res.writeHead(404).end();
     try {
       resolve(codeFromParams(params, state));
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end('<p>Logged in to Leadspicker. You can close this tab.</p>');
+      pending = res;
     } catch (err) {
       reject(/** @type {Error} */ (err));
-      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end(String(/** @type {Error} */ (err).message));
+      pending = res;
     }
   });
   return new Promise((res, rej) => {
     server.once('error', rej);
     server.listen(0, '127.0.0.1', () => {
       const address = /** @type {import('node:net').AddressInfo} */ (server.address());
-      res({ port: address.port, code, close: () => server.close() });
+      res({
+        port: address.port,
+        code,
+        /** @param {number} status @param {string} html */
+        finish: (status, html) => {
+          if (pending && !pending.headersSent) send(pending, status, html);
+        },
+        close: () => server.close(),
+      });
     });
   });
 }
