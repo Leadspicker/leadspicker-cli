@@ -65,8 +65,9 @@ describe('discovery (works logged out)', () => {
     const { code, stdout } = await cli(['--help']);
     assert.equal(code, 0);
     assert.match(stdout, /Not logged in: run leadspicker login/);
-    assert.match(stdout, /list\s+list, create, get, delete, people, import, export-data/);
+    assert.match(stdout, /list\s+list, create, get, delete, export-data, import, people/);
     assert.doesNotMatch(stdout, /project/);
+    assert.match(stdout, /\n  logout\s+log out/);
     assert.match(stdout, /Next: leadspicker <group> --help/);
   });
 
@@ -131,6 +132,23 @@ describe('login', () => {
     assert.match(result.html, /<strong>test@example\.com<\/strong>/);
     assert.match(readConfig().access_token, /^at-/);
     if (process.platform !== 'win32') assert.equal(fs.statSync(configFile()).mode & 0o777, 0o600);
+  });
+
+  test('a stray request on the loopback port does not abort the login', async () => {
+    let done = false;
+    const result = await cli(['login', '--no-browser'], {
+      onStderr: async (stderr) => {
+        const authUrl = authUrlOf(stderr);
+        if (!authUrl || done) return;
+        done = true;
+        const redirect = new URL(new URL(authUrl).searchParams.get('redirect_uri'));
+        const stray = await fetch(`${redirect}?error=access_denied&state=wrong`);
+        assert.equal(stray.status, 400);
+        const consent = await fetch(authUrl, { redirect: 'manual' });
+        await fetch(consent.headers.get('location'));
+      },
+    });
+    assert.equal(result.code, 0, result.stderr);
   });
 
   test('--no-browser: a pasted redirect URL works too', async () => {
@@ -222,6 +240,19 @@ describe('calling the API', () => {
     assert.match((await cli(['list', 'people', '--project-id', '1', '--order-by', 'x'])).stderr, /one of created, -created/);
   });
 
+  test('help words are only help where a flag can stand', async () => {
+    for (const value of ['help', '-h', '--help']) {
+      const { code, stdout } = await cli(['list', 'create', '--timezone', 'UTC', '--name', value]);
+      assert.equal(code, 0, value);
+      assert.equal(JSON.parse(lastRequest().body).name, value);
+      assert.doesNotMatch(stdout, /Usage:/);
+    }
+    assert.match((await cli(['list', 'create', '--name', 'x', '--help'])).stdout, /Usage: leadspicker list create/);
+    assert.match((await cli(['list', 'create', '--nmae', 'x', '--help'])).stdout, /Usage: leadspicker list create/);
+    assert.match((await cli(['help', 'list', 'create'])).stdout, /Usage: leadspicker list create/);
+    assert.match((await cli(['list', 'people', '--project-id', '1', '--include-deleted', '-h'])).stdout, /Usage: leadspicker list people/);
+  });
+
   test('DELETE needs --yes when not interactive', async () => {
     const refused = await cli(['list', 'delete', '--project-id', '1']);
     assert.equal(refused.code, 2);
@@ -229,6 +260,29 @@ describe('calling the API', () => {
     const confirmed = await cli(['list', 'delete', '--project-id', '1', '--yes']);
     assert.equal(confirmed.code, 0);
     assert.equal(lastRequest().method, 'DELETE');
+  });
+
+  test('raw api DELETE needs --yes too', async () => {
+    const before = server.state.requests.length;
+    const refused = await cli(['api', 'DELETE', '/lists/5']);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, /Re-run with --yes/);
+    assert.equal(server.state.requests.length, before);
+    assert.equal((await cli(['api', 'delete', '/lists/5', '-y'])).code, 0);
+    assert.equal(lastRequest().method, 'DELETE');
+  });
+
+  test('a body labelled JSON that is not is printed, not a crash', async () => {
+    const { code, stdout, stderr } = await cli(['api', 'GET', '/broken-json']);
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout, '<html>not json</html>');
+  });
+
+  test('long non-JSON error pages are cut short', async () => {
+    const { code, stderr } = await cli(['api', 'GET', '/bad-gateway']);
+    assert.equal(code, 1);
+    assert.match(stderr, /HTTP 502[\s\S]*more characters\)/);
+    assert.ok(stderr.length < 1300);
   });
 
   test('API errors go to stderr with exit code 1', async () => {
@@ -261,6 +315,19 @@ describe('token refresh', () => {
     assert.equal((await cli(['whoami'])).code, 0);
     assert.equal(server.state.refreshCalls, 1);
     assert.notEqual(readConfig().access_token, tokens.access_token);
+  });
+
+  test('a refresh that fails for another reason is an error, not a logout', async () => {
+    writeLogin({ expires_at: Date.now() - 1000 });
+    server.state.refreshStatus = 503;
+    try {
+      const { code, stderr } = await cli(['whoami']);
+      assert.equal(code, 1);
+      assert.match(stderr, /Could not refresh the login: HTTP 503/);
+      assert.ok(fs.existsSync(configFile()));
+    } finally {
+      server.state.refreshStatus = 0;
+    }
   });
 
   test('a dead refresh token means logging in again', async () => {

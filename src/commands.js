@@ -21,48 +21,108 @@ const kebab = (/** @type {string} */ s) => s.trim().toLowerCase().replace(/[^a-z
  * `GET /lists` → `list list`, `GET /lists/{id}` → `list get`, `POST /lists/{id}/magic-columns/{cid}/rerun`
  * → `list magic-columns-rerun`. `x-cli-group` / `x-cli-action` on an operation override both.
  * Deprecated operations are left out.
+ *
+ * A name depends only on the operation's own tag, path and method, never on the order or number of
+ * other operations, so it stays put while unrelated endpoints come and go. Operations whose names
+ * clash are all renamed alike (see `resolveClashes`); none keeps the plain name by coming first.
  * @param {any} spec @returns {Tree}
  */
 export function buildTree(spec) {
   const ref = makeResolver(spec);
-  const ops = Object.entries(spec.paths ?? {}).flatMap(([path, item]) =>
-    METHODS.filter((m) => item[m] && !item[m].deprecated).map((method) => ({ path, method, op: item[method], item })),
-  );
-  // Each tag's resource root (`lists` for List) is dropped from its actions.
-  /** @type {Map<string, Map<string, number>>} */
-  const roots = new Map();
-  for (const { path, op } of ops) {
-    const tag = op.tags?.[0] ?? 'other';
-    const first = segmentsOf(path)[0] ?? '';
-    const counts = roots.get(tag) ?? new Map();
-    counts.set(first, (counts.get(first) ?? 0) + 1);
-    roots.set(tag, counts);
+  const ops = Object.entries(spec.paths ?? {})
+    .flatMap(([path, item]) => METHODS.filter((m) => item[m] && !item[m].deprecated).map((method) => ({ path, method, op: item[method], item })))
+    .sort((a, b) => a.path.localeCompare(b.path) || METHODS.indexOf(a.method) - METHODS.indexOf(b.method));
+
+  /** @type {Map<string, typeof ops>} */
+  const byGroup = new Map();
+  for (const o of ops) {
+    const group = o.op['x-cli-group'] ?? kebab(o.op.tags?.[0] ?? 'other');
+    byGroup.set(group, [...(byGroup.get(group) ?? []), o]);
   }
-  const rootOf = (/** @type {string} */ tag) => [...(roots.get(tag) ?? [])].sort((a, b) => b[1] - a[1])[0]?.[0];
 
   /** @type {Tree} */
   const tree = new Map();
-  for (const { path, method, op, item } of ops) {
-    const tag = op.tags?.[0] ?? 'other';
-    const group = op['x-cli-group'] ?? kebab(tag);
-    let action = op['x-cli-action'] ?? deriveAction(method, path, Boolean(item.get), rootOf(tag));
-    const actions = tree.get(group) ?? new Map();
-    if (actions.has(action)) action = `${action}-${method}`;
-    if (actions.has(action)) action = kebab(op.operationId ?? `${method} ${path}`);
-    const params = paramsOf(op, item, ref);
-    actions.set(action, { group, action, method: method.toUpperCase(), path, op, ...params, examples: examplesOf(op, params.params) });
+  for (const [group, groupOps] of [...byGroup].sort(([a], [b]) => a.localeCompare(b))) {
+    const names = resolveClashes(groupOps);
+    /** @type {Map<string, Command>} */
+    const actions = new Map();
+    groupOps.forEach(({ path, method, op, item }, i) => {
+      const params = paramsOf(op, item, ref);
+      actions.set(names[i], { group, action: names[i], method: method.toUpperCase(), path, op, ...params, examples: examplesOf(op, params.params) });
+    });
     tree.set(group, actions);
   }
-  return new Map([...tree].sort(([a], [b]) => a.localeCompare(b)));
+  return tree;
+}
+
+/**
+ * Action names for one group's operations. Each operation first gets its short name (tag root
+ * dropped). Operations sharing a name all fall back, together, to their full path words; if those
+ * still clash (same path), to the short name plus the method when their methods differ, else to
+ * their operationId.
+ * @param {{path: string, method: string, op: any, item: any}[]} ops @returns {string[]}
+ */
+function resolveClashes(ops) {
+  const fixed = ops.map(({ op }) => op['x-cli-action'] ?? null);
+  /** @type {((i: number) => string)[]} */
+  const steps = [
+    (i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ops[i].op.tags?.[0] ?? ''),
+    (i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ''),
+    (i) => `${deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ops[i].op.tags?.[0] ?? '')}-${ops[i].method}`,
+    (i) => operationName(ops[i].op.operationId ?? `${ops[i].method} ${ops[i].path}`),
+  ];
+  const names = ops.map((_, i) => fixed[i] ?? steps[0](i));
+  for (const [n, step] of steps.entries()) {
+    if (n === 0) continue;
+    const clashes = clashing(names);
+    for (const members of clashes) {
+      const movable = members.filter((i) => fixed[i] === null);
+      // A method suffix only separates operations whose methods differ.
+      if (n === 2 && new Set(movable.map((i) => ops[i].method)).size < movable.length) continue;
+      for (const i of movable) names[i] = step(i);
+    }
+  }
+  // Last resort, never expected: number what is still equal, in path order.
+  for (const members of clashing(names)) members.slice(1).forEach((i, k) => (names[i] = `${names[i]}-${k + 2}`));
+  return names;
+}
+
+/**
+ * An operationId as an action: django-ninja's default ids start with the Python module
+ * (`apps_salesbooster_apis_email_accounts_email_accounts_update`), which is dropped, as is a
+ * module name the function name repeats → `email-accounts-update`.
+ * @param {string} operationId
+ */
+export function operationName(operationId) {
+  const words = kebab(operationId).replace(/^apps-[a-z]+-apis?-/, '').split('-');
+  for (let k = Math.floor(words.length / 2); k > 0; k--) {
+    if (words.slice(0, k).join('-') === words.slice(k, 2 * k).join('-')) return words.slice(k).join('-');
+  }
+  return words.join('-');
+}
+
+/** Index groups of equal names. @param {string[]} names */
+function clashing(names) {
+  /** @type {Map<string, number[]>} */
+  const seen = new Map();
+  names.forEach((name, i) => seen.set(name, [...(seen.get(name) ?? []), i]));
+  return [...seen.values()].filter((members) => members.length > 1);
 }
 
 const segmentsOf = (/** @type {string} */ path) => path.replace(API_PREFIX, '').split('/').filter(Boolean);
 
-/** @param {string} method @param {string} path @param {boolean} hasGet @param {string | undefined} root */
-export function deriveAction(method, path, hasGet, root) {
+/** Path segments that just repeat the tag: `lists` for List, `projects`/`persons` for Project Persons. @param {string} tag */
+function rootsOf(tag) {
+  const words = kebab(tag).split('-').filter(Boolean);
+  const forms = (/** @type {string} */ w) => [w, `${w}s`, w.endsWith('y') ? `${w.slice(0, -1)}ies` : w, w.endsWith('s') ? w.slice(0, -1) : w];
+  return new Set([kebab(tag), ...words.flatMap(forms)]);
+}
+
+/** @param {string} method @param {string} path @param {boolean} hasGet @param {string} tag the tag whose root to drop, or '' */
+export function deriveAction(method, path, hasGet, tag) {
   const segments = segmentsOf(path);
-  const rest = segments[0] === root ? segments.slice(1) : segments;
-  const words = rest.filter((s) => !isParam(s));
+  const rest = tag && rootsOf(tag).has(segments[0] ?? '') ? segments.slice(1) : segments;
+  const words = rest.filter((s) => !isParam(s)).map(kebab);
   const endsWithId = isParam(segments.at(-1) ?? '');
   const verb =
     method === 'get' ? (endsWithId ? 'get' : words.length ? '' : 'list')
@@ -186,24 +246,43 @@ function convert(raw, schema, flag) {
 
 /**
  * `--flag value` pairs → values per parameter. Arrays take repeated flags (or one JSON array),
- * booleans take `--flag` / `--no-flag`, objects take JSON.
- * @param {Command} cmd @param {string[]} argv @returns {Record<string, unknown>}
+ * booleans take `--flag` / `--no-flag`, objects take JSON. The shared flags `--input`, `--yes` and
+ * `--help` are recognised only where a flag can stand, so `--name help` or `--name -h` stay values.
+ * @param {Command} cmd @param {string[]} argv
+ * @returns {{values: Record<string, unknown>, input?: string, yes: boolean, help: boolean}}
  */
 export function parseFlags(cmd, argv) {
   const byFlag = new Map(cmd.params.map((p) => [flagOf(p.name), p]));
   /** @type {Record<string, unknown>} */
   const values = {};
+  /** @type {string | undefined} */
+  let input;
+  let yes = false;
   const seenArrays = new Set();
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
+    if (token === '--help' || token === '-h') return { values, input, yes, help: true };
+    if (token === '--yes' || token === '-y') {
+      yes = true;
+      continue;
+    }
+    if (token === '--input' || token.startsWith('--input=')) {
+      input = token === '--input' ? argv[++i] : token.slice(8);
+      if (input === undefined) throw usageError(cmd, '--input needs a file or -.');
+      continue;
+    }
     if (!token.startsWith('--')) throw usageError(cmd, `Unexpected argument "${token}".`);
     const eq = token.indexOf('=');
     const [flag, inline] = eq > 0 ? [token.slice(0, eq), token.slice(eq + 1)] : [token, undefined];
     const negated = flag.startsWith('--no-') && !byFlag.has(flag) && byFlag.has(`--${flag.slice(5)}`);
     const param = byFlag.get(negated ? `--${flag.slice(5)}` : flag.replaceAll('_', '-'));
-    if (!param) throw usageError(cmd, `Unknown flag ${flag}.${suggest(flag, [...byFlag.keys()])}`);
+    if (!param) {
+      // A later --help still wins over a mistyped flag before it.
+      if (argv.slice(i + 1).some((t) => t === '--help' || t === '-h')) return { values, input, yes, help: true };
+      throw usageError(cmd, `Unknown flag ${flag}.${suggest(flag, [...byFlag.keys()])}`);
+    }
     const schema = baseType(param.schema);
-    if (schema.type === 'boolean' && inline === undefined && (negated || argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) {
+    if (schema.type === 'boolean' && inline === undefined && (negated || argv[i + 1] === undefined || /^--|^-[hy]$/.test(argv[i + 1]))) {
       values[param.name] = !negated;
       continue;
     }
@@ -217,7 +296,7 @@ export function parseFlags(cmd, argv) {
       values[param.name] = convert(raw, schema, flag);
     }
   }
-  return values;
+  return { values, input, yes, help: false };
 }
 
 /**
@@ -293,7 +372,7 @@ const MAX_ACTIONS_LISTED = 8;
 
 /** @param {Tree} tree @param {string} status */
 export function rootHelp(tree, status) {
-  const width = Math.max(...[...tree.keys()].map((g) => g.length)) + 2;
+  const width = Math.max(...[...tree.keys(), 'logout', 'whoami'].map((g) => g.length)) + 2;
   const groups = [...tree].map(([group, actions]) => {
     const names = [...actions.keys()];
     const more = names.length > MAX_ACTIONS_LISTED ? `, … +${names.length - MAX_ACTIONS_LISTED}` : '';

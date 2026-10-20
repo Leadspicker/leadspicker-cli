@@ -44,8 +44,12 @@ Typos get suggestions, and a wrong or missing flag prints the usage line with an
 - **`--input file.json`** (or `-` for stdin) sends a JSON body. Flags are merged into it.
 - **File fields** (imports) take a path: `--file contacts.csv`.
 - **`--yes`** confirms a DELETE when the command isn't run interactively.
-- **`leadspicker api <METHOD> <path> [--input body.json]`** sends a raw request to any API path, e.g.
-  `leadspicker api GET /lists`.
+- **`leadspicker api <METHOD> <path> [--input body.json] [--yes]`** sends a raw request to any API path, e.g.
+  `leadspicker api GET /lists`. A raw DELETE needs `--yes` too.
+
+**Command names follow the API.** They are derived from it each time, so a server release that renames, moves
+or retags an endpoint can change a command's name. Scripts that must not break can pin the endpoint with
+`leadspicker api` instead; `<group> <action> --help` shows each command's `METHOD /path`.
 
 JSON responses are printed as JSON: pretty in a terminal, compact when piped. Anything else, such as CSV exports,
 is written as-is, so `> export.csv` works.
@@ -77,7 +81,11 @@ Plain JavaScript (ESM, JSDoc types) with no build step and no dependencies. Rele
 
 Commands are built from the OpenAPI document as follows:
 - Tags become groups.
-- The path and method become the action: `GET /lists/{id}` → `get`, `POST /lists/{id}/clone` → `clone`.
+- The path and method become the action: `GET /lists/{id}` → `get`, `POST /lists/{id}/clone` → `clone`. A first
+  path segment that just repeats the tag (`lists` for List) is dropped.
+- A name depends only on the operation's own tag, path and method, never on the order of the document. When
+  names clash, every clashing operation is renamed the same way: to its full path words, then (same path) a
+  method suffix, then its operationId.
 - The server can override these with the operation extensions `x-cli-group`, `x-cli-action` and
   `x-cli-examples`. Without `x-cli-examples`, the ```json payloads in operation descriptions are used as
   examples.

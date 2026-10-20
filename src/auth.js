@@ -12,7 +12,6 @@ import { errorPage, successPage } from './page.js';
 
 export const DEFAULT_URL = 'https://app.leadspicker.com';
 // The server's built-in public OAuth client, which accepts any loopback redirect port.
-// A dedicated "Leadspicker CLI" client is a server-side follow-up (t12701).
 const CLIENT_ID = 'salesbooster';
 const SCOPE = 'mcp offline_access';
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
@@ -181,6 +180,8 @@ function listenForCallback(state) {
   const server = http.createServer((req, res) => {
     const params = new URL(req.url || '/', 'http://127.0.0.1').searchParams;
     if (pending || (!params.has('code') && !params.has('error'))) return res.writeHead(404).end();
+    // Only the redirect carrying our state counts; anything else that finds the port is ignored.
+    if (params.get('state') !== state) return res.writeHead(400, { 'content-type': 'text/plain' }).end('Unexpected request.');
     try {
       resolve(codeFromParams(params, state));
       pending = res;
@@ -208,8 +209,8 @@ function listenForCallback(state) {
 
 /** @param {URLSearchParams} params @param {string} state */
 function codeFromParams(params, state) {
-  if (params.get('error')) throw new CliError(`Login refused: ${params.get('error_description') || params.get('error')}`, EXIT.AUTH);
   if (params.get('state') !== state) throw new CliError('Login failed: state mismatch.', EXIT.AUTH);
+  if (params.get('error')) throw new CliError(`Login refused: ${params.get('error_description') || params.get('error')}`, EXIT.AUTH);
   const code = params.get('code');
   if (!code) throw new CliError('Login failed: no code in the redirect.', EXIT.AUTH);
   return code;
@@ -258,7 +259,9 @@ export async function getSession(rejectedToken) {
       refresh_token: current.refresh_token,
       client_id: current.client_id,
     });
-    if (!token.ok) throw notLoggedIn('Session expired.');
+    // Only a refused refresh token means logging in again; an outage or rate limit is just an error.
+    if (token.status === 400 && token.body.error === 'invalid_grant') throw notLoggedIn('Session expired.');
+    if (!token.ok) throw new CliError(`Could not refresh the login: HTTP ${token.status}${token.body.error ? ` ${token.body.error}` : ''}. Try again shortly.`);
     const next = { ...current, ...tokenFields(token.body) };
     writeConfig(next);
     return next;

@@ -1,10 +1,9 @@
 // @ts-check
 import { PROG } from './commands.js';
 
-// The page the browser lands on after `login`, styled like the server's OAuth consent page
-// (templates/oauth_consent.html in StartupDB): same tokens, font, logo and card; success/error colours
-// are the app's (apps/salesbooster/vue/colors.scss). The logo, favicon
-// and font come from the server the user just logged in to.
+// The page the browser lands on after `login`, styled like Leadspicker's OAuth consent page. The logo
+// and favicon come from the server the user just logged in to; fonts are the system's, so the page
+// makes no third-party requests.
 
 const escape = (/** @type {string} */ s) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
@@ -29,7 +28,6 @@ function render({ base, kind, title, text, command }) {
 <meta name="robots" content="noindex">
 <title>${escape(title)} – Leadspicker</title>
 <link rel="shortcut icon" href="${escape(base)}/static/frontend/img/favicon.ico">
-<link href="https://fonts.googleapis.com/css?family=Poppins:400,500,600&display=swap" rel="stylesheet">
 <style>
   :root {
     --color-primary: #335CFF;
@@ -49,7 +47,7 @@ function render({ base, kind, title, text, command }) {
     margin: 0;
     min-height: 100vh;
     color: var(--color-black-3);
-    font-family: "Poppins", sans-serif;
+    font-family: "Poppins", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     background: linear-gradient(180deg, var(--color-background-weakest), var(--lp-color-background));
   }
   .brand { padding: 32px 16px 12px; text-align: center; }

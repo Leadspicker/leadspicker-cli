@@ -64,7 +64,7 @@ export const SPEC = {
 };
 
 export async function startFakeServer() {
-  const state = { denyConsent: false, refreshCalls: 0, specFetches: 0, revoked: [], requests: [], access: new Set(), refresh: new Set(), codes: new Map(), counter: 0 };
+  const state = { denyConsent: false, refreshStatus: 0, refreshCalls: 0, specFetches: 0, revoked: [], requests: [], access: new Set(), refresh: new Set(), codes: new Map(), counter: 0 };
   const issue = () => {
     const n = ++state.counter;
     state.access.add(`at-${n}`);
@@ -102,6 +102,7 @@ export async function startFakeServer() {
         return json(res, 200, issue());
       }
       state.refreshCalls++;
+      if (state.refreshStatus) return json(res, state.refreshStatus, { error: 'server_error' });
       // Rotation: a refresh token works exactly once.
       if (!state.refresh.delete(form.get('refresh_token'))) return json(res, 400, { error: 'invalid_grant' });
       return json(res, 200, issue());
@@ -124,6 +125,8 @@ export async function startFakeServer() {
     state.requests.push(record);
 
     if (url.pathname === `${P}/auth/me`) return json(res, 200, { email: 'test@example.com' });
+    if (url.pathname === `${P}/broken-json`) return res.writeHead(200, { 'content-type': 'application/json' }).end('<html>not json</html>');
+    if (url.pathname === `${P}/bad-gateway`) return res.writeHead(502, { 'content-type': 'text/html' }).end(`<html>${'x'.repeat(5000)}</html>`);
     if (url.pathname === `${P}/lists/404`) return json(res, 404, { detail: 'List not found.' });
     if (url.pathname.endsWith('/export-data')) return res.writeHead(200, { 'content-type': 'text/csv' }).end('name,email\nAda,ada@example.com\n');
     if (req.method === 'DELETE') return res.writeHead(204).end();

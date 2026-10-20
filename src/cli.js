@@ -36,9 +36,13 @@ async function run(argv) {
   if (first === 'whoami') return printResponse(await send('GET', '/auth/me'));
   if (first === 'api') return api(rest);
 
-  const wantsHelp = argv.includes('--help') || argv.includes('-h') || first === 'help';
-  const words = argv.filter((a) => a !== '--help' && a !== '-h' && a !== 'help');
-  const [groupName, actionName, ...flags] = words;
+  // `help` as the first word, then up to two command words; everything after them is flags.
+  const args = first === 'help' ? rest : argv;
+  let n = 0;
+  while (n < 2 && n < args.length && !args[n].startsWith('-')) n++;
+  const [groupName, actionName] = args.slice(0, n);
+  const flags = args.slice(n);
+  const helpFlag = flags.includes('--help') || flags.includes('-h');
 
   let { spec, fromCache } = await loadSpec(baseUrl());
   let tree = buildTree(spec);
@@ -48,6 +52,7 @@ async function run(argv) {
   }
 
   if (!groupName) {
+    if (flags.length && !helpFlag) throw new CliError(`Unknown option ${flags[0]}.\nRun ${PROG} --help for the commands.`, EXIT.USAGE);
     const config = readConfig();
     return print(rootHelp(tree, config ? `Logged in to ${config.url}.` : `Not logged in: run ${PROG} login.`));
   }
@@ -55,13 +60,13 @@ async function run(argv) {
   if (!actions) throw new CliError(`Unknown command "${groupName}".${suggest(groupName, [...tree.keys()])}\nRun ${PROG} --help for the list.`, EXIT.USAGE);
   const cmd = findCommand(tree, groupName, actionName ?? '');
   if (!cmd) {
-    if (wantsHelp || !actionName) return print(groupHelp(groupName, actions));
+    if (!actionName) return print(groupHelp(groupName, actions));
     throw new CliError(`Unknown action "${actionName}" in ${groupName}.${suggest(actionName, [...actions.keys()])}\nRun ${PROG} ${groupName} --help for its actions.`, EXIT.USAGE);
   }
-  if (wantsHelp) return print(actionHelp(cmd, tree));
+  if (first === 'help') return print(actionHelp(cmd, tree));
 
-  const { input, yes, remaining } = takeCommonFlags(flags);
-  const values = parseFlags(cmd, remaining);
+  const { values, input, yes, help } = parseFlags(cmd, flags);
+  if (help) return print(actionHelp(cmd, tree));
   const req = buildRequest(cmd, values, input === undefined ? undefined : readJsonInput(input));
   if (cmd.method === 'DELETE' && !yes) await confirm(`${groupName} ${actionName}`);
 
@@ -93,16 +98,27 @@ async function send(method, apiPath, body) {
   return res;
 }
 
+const MAX_ERROR_BODY = 1000;
+
 /** JSON is printed as JSON, text as text, anything else (exports) as raw bytes. @param {Response} res */
 async function printResponse(res) {
   const type = res.headers.get('content-type') ?? '';
   const bytes = Buffer.from(await res.arrayBuffer());
   let out = bytes;
+  let isJson = false;
   if (type.includes('json') && bytes.length) {
-    const json = JSON.parse(bytes.toString('utf8'));
-    out = Buffer.from(`${process.stdout.isTTY ? JSON.stringify(json, null, 2) : JSON.stringify(json)}\n`);
+    try {
+      const json = JSON.parse(bytes.toString('utf8'));
+      out = Buffer.from(`${process.stdout.isTTY ? JSON.stringify(json, null, 2) : JSON.stringify(json)}\n`);
+      isJson = true;
+    } catch {} // labelled JSON but isn't: shown as it came
   }
-  if (!res.ok) throw new CliError(`HTTP ${res.status} ${res.statusText}\n${out.toString('utf8').trim()}`);
+  if (!res.ok) {
+    // Error pages (a proxy's HTML 502) can be long: keep the start.
+    let text = out.toString('utf8').trim();
+    if (!isJson && text.length > MAX_ERROR_BODY) text = `${text.slice(0, MAX_ERROR_BODY)}… (${text.length - MAX_ERROR_BODY} more characters)`;
+    throw new CliError(`HTTP ${res.status} ${res.statusText}\n${text}`);
+  }
   if (out.length) process.stdout.write(out);
 }
 
@@ -121,20 +137,6 @@ function formData(fields, files) {
     }
   }
   return form;
-}
-
-/** Pulls --input / --yes out of the command's flags. @param {string[]} flags */
-function takeCommonFlags(flags) {
-  /** @type {string | undefined} */ let input;
-  let yes = false;
-  /** @type {string[]} */ const remaining = [];
-  for (let i = 0; i < flags.length; i++) {
-    if (flags[i] === '--yes' || flags[i] === '-y') yes = true;
-    else if (flags[i] === '--input') input = flags[++i];
-    else if (flags[i].startsWith('--input=')) input = flags[i].slice(8);
-    else remaining.push(flags[i]);
-  }
-  return { input, yes, remaining };
 }
 
 /** @param {string} source a path or "-" for stdin */
@@ -157,28 +159,40 @@ async function confirm(what) {
 
 const print = (/** @type {string} */ text) => void process.stdout.write(`${text}\n`);
 
-/** `leadspicker api <METHOD> <path> [--input body.json|-]`: any API path, raw. @param {string[]} argv */
+/** `leadspicker api <METHOD> <path> [--input body.json|-] [--yes]`: any API path, raw. @param {string[]} argv */
 async function api(argv) {
-  const usage = `Usage: ${PROG} api <METHOD> <path> [--input body.json|-]\nExample: ${PROG} api GET /lists`;
+  const usage = `Usage: ${PROG} api <METHOD> <path> [--input body.json|-] [--yes]\nExample: ${PROG} api GET /lists`;
   const [method, apiPath, ...flags] = argv;
   if (!method || method === '--help' || method === '-h') return print(usage);
-  if (!apiPath) throw new CliError(usage, EXIT.USAGE);
-  const { input, remaining } = takeCommonFlags(flags);
-  if (remaining.length) throw new CliError(`Unexpected ${remaining.join(' ')}\n${usage}`, EXIT.USAGE);
-  await printResponse(await send(method.toUpperCase(), apiPath, input === undefined ? undefined : JSON.stringify(readJsonInput(input))));
+  if (!apiPath || apiPath.startsWith('-')) {
+    if (apiPath === '--help' || apiPath === '-h') return print(usage);
+    throw new CliError(usage, EXIT.USAGE);
+  }
+  const opts = parseOwnFlags(flags, { input: 'string', yes: 'boolean', help: 'boolean' }, { y: 'yes', h: 'help' });
+  if (opts.help) return print(usage);
+  const verb = method.toUpperCase();
+  if (verb === 'DELETE' && !opts.yes) await confirm(`DELETE ${apiPath}`);
+  const body = opts.input === undefined ? undefined : JSON.stringify(readJsonInput(String(opts.input)));
+  await printResponse(await send(verb, apiPath, body));
 }
 
 /**
  * Flags of the built-in commands. @param {string[]} argv @param {Record<string, 'string' | 'boolean'>} spec
+ * @param {Record<string, string>} [short] one-letter aliases, e.g. {y: 'yes'}
  * @returns {Record<string, string | boolean | undefined>}
  */
-function parseOwnFlags(argv, spec) {
+function parseOwnFlags(argv, spec, short = {}) {
   /** @type {Record<string, string | boolean | undefined>} */
   const out = {};
   for (let i = 0; i < argv.length; i++) {
-    const [name, inline] = argv[i].replace(/^--/, '').split(/=(.*)/s);
-    if (!argv[i].startsWith('--') || !spec[name]) throw new CliError(`Unknown option ${argv[i]}. Options: ${Object.keys(spec).map((k) => `--${k}`).join(' ')}`, EXIT.USAGE);
-    out[name] = spec[name] === 'boolean' ? true : inline ?? argv[++i];
+    const alias = /^-([a-z])$/.exec(argv[i])?.[1];
+    const [name, inline] = alias ? [short[alias] ?? argv[i], undefined] : argv[i].replace(/^--/, '').split(/=(.*)/s);
+    if (!(alias || argv[i].startsWith('--')) || !spec[name]) throw new CliError(`Unknown option ${argv[i]}. Options: ${Object.keys(spec).map((k) => `--${k}`).join(' ')}`, EXIT.USAGE);
+    if (spec[name] === 'boolean') out[name] = true;
+    else {
+      out[name] = inline ?? argv[++i];
+      if (out[name] === undefined) throw new CliError(`--${name} needs a value.`, EXIT.USAGE);
+    }
   }
   return out;
 }
