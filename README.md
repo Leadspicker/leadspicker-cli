@@ -76,17 +76,32 @@ npm test     # node:test, against a fake OAuth + API server
 node bin/leadspicker.js --help
 ```
 
-Plain JavaScript (ESM, JSDoc types) with no build step and no dependencies. Releases are published to npm from
-`v*` tags by `.github/workflows/publish.yml`; `-beta` versions go to the `beta` dist-tag.
+Plain JavaScript (ESM, JSDoc types) with no build step and no dependencies.
 
 Commands are built from the OpenAPI document as follows:
 - Tags become groups.
 - The path and method become the action: `GET /lists/{id}` → `get`, `POST /lists/{id}/clone` → `clone`. A first
-  path segment that just repeats the tag (`lists` for List) is dropped.
-- A name depends only on the operation's own tag, path and method, never on the order of the document. When
+  path segment that just repeats the tag (`lists` for List, `api-keys` for API Key) is dropped; for a tag no path
+  repeats, its most frequent first segment is dropped instead (`tricorder` for Company intelligence).
+- A name depends only on the operation's own tag, path and method (and, for that fallback, on which first segment
+  its tag uses most), never on the order of the document. When
   names clash, every clashing operation is renamed the same way: to its full path words, then (same path) a
   method suffix, then its operationId.
 - The server can override these with the operation extensions `x-cli-group`, `x-cli-action` and
   `x-cli-examples`. Without `x-cli-examples`, the ```json payloads in operation descriptions are used as
   examples.
 - Deprecated operations are hidden.
+
+## Releasing
+
+Releases are published by hand from a maintainer's machine (npm asks for a browser 2FA approval):
+
+```bash
+npm version 0.1.0-beta.3 -m "%s"    # bumps package.json, commits and tags v0.1.0-beta.3
+git push origin main --follow-tags
+npm test && npm publish --access public --tag beta    # pre-releases
+npm publish --access public                           # stable releases (moves `latest`)
+```
+
+Pre-releases must go out with `--tag beta`, or they become `latest`. Until the first stable release, `latest`
+points at the deprecated `0.0.0-stage` placeholder, so a plain `npm i @leadspicker/cli` never installs a beta.
