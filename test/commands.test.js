@@ -46,6 +46,33 @@ test('adding an unrelated endpoint renames nothing', () => {
   assert.equal(before.size, names(SPEC).length);
 });
 
+test('a multi-word tag drops its whole plural; a tag no path repeats drops its most frequent root', () => {
+  const spec = {
+    paths: {
+      [`${P}/api-keys`]: { get: op('API Key'), post: op('API Key') },
+      [`${P}/api-keys/{id}`]: { delete: op('API Key') },
+      [`${P}/tricorder/companies/search`]: { post: op('Company intelligence') },
+      [`${P}/tricorder/company/{id}`]: { get: op('Company intelligence') },
+      [`${P}/workflows/{id}`]: { get: op('Integrations'), delete: op('Integrations') },
+      [`${P}/workflow-types`]: { get: op('Integrations') },
+      [`${P}/b-accounts/{id}`]: { get: op('Outreach Accounts') },
+      [`${P}/a-accounts/{id}`]: { get: op('Outreach Accounts') },
+    },
+  };
+  assert.deepEqual(names(spec), [
+    'api-key create = POST /api-keys',
+    'api-key delete = DELETE /api-keys/{id}',
+    'api-key list = GET /api-keys',
+    'company-intelligence companies-search = POST /tricorder/companies/search',
+    'company-intelligence company-get = GET /tricorder/company/{id}',
+    'integrations delete = DELETE /workflows/{id}',
+    'integrations get = GET /workflows/{id}',
+    'integrations workflow-types = GET /workflow-types',
+    'outreach-accounts b-accounts-get = GET /b-accounts/{id}',
+    'outreach-accounts get = GET /a-accounts/{id}',
+  ]);
+});
+
 test('operationName drops the python module prefix', () => {
   assert.equal(operationName('apps_salesbooster_apis_email_accounts_email_accounts_update'), 'email-accounts-update');
   assert.equal(operationName('apps_salesbooster_api_get_lists'), 'get-lists');

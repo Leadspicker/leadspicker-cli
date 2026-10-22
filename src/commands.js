@@ -22,9 +22,10 @@ const kebab = (/** @type {string} */ s) => s.trim().toLowerCase().replace(/[^a-z
  * → `list magic-columns-rerun`. `x-cli-group` / `x-cli-action` on an operation override both.
  * Deprecated operations are left out.
  *
- * A name depends only on the operation's own tag, path and method, never on the order or number of
- * other operations, so it stays put while unrelated endpoints come and go. Operations whose names
- * clash are all renamed alike (see `resolveClashes`); none keeps the plain name by coming first.
+ * A name depends only on the operation's own tag, path and method (and, for a tag none of whose paths
+ * repeat it, on which first segment that tag uses most; see `tagRoots`), never on the order of the
+ * operations, so it stays put while unrelated endpoints come and go. Operations whose names clash are
+ * all renamed alike (see `resolveClashes`); none keeps the plain name by coming first.
  * @param {any} spec @returns {Tree}
  */
 export function buildTree(spec) {
@@ -40,10 +41,11 @@ export function buildTree(spec) {
     byGroup.set(group, [...(byGroup.get(group) ?? []), o]);
   }
 
+  const roots = tagRoots(ops);
   /** @type {Tree} */
   const tree = new Map();
   for (const [group, groupOps] of [...byGroup].sort(([a], [b]) => a.localeCompare(b))) {
-    const names = resolveClashes(groupOps);
+    const names = resolveClashes(groupOps, roots);
     /** @type {Map<string, Command>} */
     const actions = new Map();
     groupOps.forEach(({ path, method, op, item }, i) => {
@@ -60,15 +62,17 @@ export function buildTree(spec) {
  * dropped). Operations sharing a name all fall back, together, to their full path words; if those
  * still clash (same path), to the short name plus the method when their methods differ, else to
  * their operationId.
- * @param {{path: string, method: string, op: any, item: any}[]} ops @returns {string[]}
+ * @param {{path: string, method: string, op: any, item: any}[]} ops @param {Map<string, Set<string>>} roots
+ * @returns {string[]}
  */
-function resolveClashes(ops) {
+function resolveClashes(ops, roots) {
   const fixed = ops.map(({ op }) => op['x-cli-action'] ?? null);
+  const short = (/** @type {number} */ i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), roots.get(ops[i].op.tags?.[0]) ?? new Set());
   /** @type {((i: number) => string)[]} */
   const steps = [
-    (i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ops[i].op.tags?.[0] ?? ''),
-    (i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ''),
-    (i) => `${deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), ops[i].op.tags?.[0] ?? '')}-${ops[i].method}`,
+    short,
+    (i) => deriveAction(ops[i].method, ops[i].path, Boolean(ops[i].item.get), new Set()),
+    (i) => `${short(i)}-${ops[i].method}`,
     (i) => operationName(ops[i].op.operationId ?? `${ops[i].method} ${ops[i].path}`),
   ];
   const names = ops.map((_, i) => fixed[i] ?? steps[0](i));
@@ -111,17 +115,47 @@ function clashing(names) {
 
 const segmentsOf = (/** @type {string} */ path) => path.replace(API_PREFIX, '').split('/').filter(Boolean);
 
-/** Path segments that just repeat the tag: `lists` for List, `projects`/`persons` for Project Persons. @param {string} tag */
+/**
+ * Path segments that just repeat the tag: `lists` for List, `api-keys` for API Key, `projects`/`persons`
+ * for Project Persons. @param {string} tag
+ */
 function rootsOf(tag) {
   const words = kebab(tag).split('-').filter(Boolean);
   const forms = (/** @type {string} */ w) => [w, `${w}s`, w.endsWith('y') ? `${w.slice(0, -1)}ies` : w, w.endsWith('s') ? w.slice(0, -1) : w];
-  return new Set([kebab(tag), ...words.flatMap(forms)]);
+  return new Set([...forms(kebab(tag)), ...words.flatMap(forms)]);
 }
 
-/** @param {string} method @param {string} path @param {boolean} hasGet @param {string} tag the tag whose root to drop, or '' */
-export function deriveAction(method, path, hasGet, tag) {
+/**
+ * The first path segments each tag drops from its actions: those that repeat the tag (`rootsOf`), or,
+ * when none of the tag's paths starts with one (`tricorder` under Company intelligence), the tag's most
+ * frequent first segment, ties broken alphabetically. Both depend only on the set of operations.
+ * @param {{path: string, op: any}[]} ops @returns {Map<string, Set<string>>}
+ */
+function tagRoots(ops) {
+  /** @type {Map<string, Map<string, number>>} */
+  const firsts = new Map();
+  for (const { path, op } of ops) {
+    const tag = op.tags?.[0];
+    if (!tag) continue;
+    const counts = firsts.get(tag) ?? new Map();
+    const first = segmentsOf(path)[0] ?? '';
+    counts.set(first, (counts.get(first) ?? 0) + 1);
+    firsts.set(tag, counts);
+  }
+  /** @type {Map<string, Set<string>>} */
+  const roots = new Map();
+  for (const [tag, counts] of firsts) {
+    const own = rootsOf(tag);
+    const top = [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b))[0][0];
+    roots.set(tag, [...counts.keys()].some((s) => own.has(s)) ? own : new Set([top]));
+  }
+  return roots;
+}
+
+/** @param {string} method @param {string} path @param {boolean} hasGet @param {Set<string>} roots first segments to drop */
+export function deriveAction(method, path, hasGet, roots) {
   const segments = segmentsOf(path);
-  const rest = tag && rootsOf(tag).has(segments[0] ?? '') ? segments.slice(1) : segments;
+  const rest = roots.has(segments[0] ?? '') ? segments.slice(1) : segments;
   const words = rest.filter((s) => !isParam(s)).map(kebab);
   const endsWithId = isParam(segments.at(-1) ?? '');
   const verb =
