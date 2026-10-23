@@ -97,11 +97,10 @@ Commands are built from the OpenAPI document as follows:
 Releases are published by hand from a maintainer's machine (npm asks for a browser 2FA approval):
 
 ```bash
-npm version 0.1.0-beta.3 -m "%s"    # bumps package.json, commits and tags v0.1.0-beta.3
+npm version 0.2.0 -m "%s"    # bumps package.json, commits and tags v0.2.0
 git push origin main --follow-tags
-npm test && npm publish --access public --tag beta    # pre-releases
-npm publish --access public                           # stable releases (moves `latest`)
+npm test && npm publish --access public              # stable releases (moves `latest`)
+npm test && npm publish --access public --tag beta   # pre-releases such as 0.2.0-beta.1
 ```
 
-Pre-releases must go out with `--tag beta`, or they become `latest`. Until the first stable release, `latest`
-points at the deprecated `0.0.0-stage` placeholder, so a plain `npm i @leadspicker/cli` never installs a beta.
+Pre-releases must go out with `--tag beta`, or they become `latest`.
